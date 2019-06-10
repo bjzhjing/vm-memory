@@ -20,6 +20,7 @@
 //! - [GuestMemoryMmap](struct.GuestMemoryMmap.html): provides methods to access a collection of
 //! GuestRegionMmap objects.
 
+use std::borrow::Borrow;
 use std::io::{Read, Write};
 use std::ops::Deref;
 use std::result;
@@ -296,6 +297,10 @@ impl GuestMemoryRegion for GuestRegionMmap {
         self.guest_base
     }
 
+    fn file_offset(&self) -> Option<&FileOffset> {
+        self.mapping.file_offset()
+    }
+
     unsafe fn as_slice(&self) -> Option<&[u8]> {
         Some(self.mapping.as_slice())
     }
@@ -315,54 +320,53 @@ impl GuestMemoryMmap {
     /// Creates a container and allocates anonymous memory for guest memory regions.
     /// Valid memory regions are specified as a Vec of (Address, Size) tuples sorted by Address.
     pub fn new(ranges: &[(GuestAddress, usize)]) -> result::Result<Self, Error> {
-        if ranges.is_empty() {
-            return Err(Error::NoMemoryRegion);
-        }
+        Self::with_files(ranges.iter().map(|r| (r.0, r.1, None)))
+    }
 
-        let mut regions = Vec::<GuestRegionMmap>::new();
-        for range in ranges.iter() {
-            if let Some(last) = regions.last() {
-                if last
-                    .guest_base
-                    .checked_add(last.mapping.len() as GuestUsize)
-                    .map_or(true, |a| a > range.0)
-                {
-                    return Err(Error::MemoryRegionOverlap);
-                }
-            }
+    /// Creates a container and allocates anonymous memory for guest memory regions.
+    /// Valid memory regions are specified as a Vec of (Address, Size, Option<FileOffset>)
+    /// tuples sorted by Address.
+    pub fn with_files<A, T>(ranges: T) -> result::Result<Self, Error>
+    where
+        A: Borrow<(GuestAddress, usize, Option<FileOffset>)>,
+        T: IntoIterator<Item = A>,
+    {
+        Self::from_regions(
+            ranges
+                .into_iter()
+                .map(|x| {
+                    let guest_base = x.borrow().0;
+                    let size = x.borrow().1;
 
-            let mapping = MmapRegion::new(range.1).map_err(Error::MmapRegion)?;
-            regions.push(GuestRegionMmap {
-                mapping,
-                guest_base: range.0,
-            });
-        }
-
-        Ok(Self {
-            regions: Arc::new(regions),
-        })
+                    if let Some(ref f_off) = x.borrow().2 {
+                        MmapRegion::from_file(f_off.clone(), size)
+                    } else {
+                        MmapRegion::new(size)
+                    }
+                    .map_err(Error::MmapRegion)
+                    .and_then(|r| GuestRegionMmap::new(r, guest_base))
+                })
+                .collect::<result::Result<Vec<_>, Error>>()?,
+        )
     }
 
     /// Creates a container and adds an existing set of mappings to it.
-    pub fn from_regions(ranges: Vec<GuestRegionMmap>) -> result::Result<Self, Error> {
-        if ranges.is_empty() {
+    pub fn from_regions(regions: Vec<GuestRegionMmap>) -> result::Result<Self, Error> {
+        if regions.is_empty() {
             return Err(Error::NoMemoryRegion);
         }
 
-        for rangei in 1..ranges.len() {
-            let range = &ranges[rangei];
-            let last = &ranges[rangei - 1];
-            if last
-                .guest_base
-                .checked_add(last.mapping.len() as GuestUsize)
-                .map_or(true, |a| a > range.start_addr())
-            {
+        for i in 1..regions.len() {
+            let region = &regions[i];
+            let last = &regions[i - 1];
+
+            if last.guest_base.0 + last.mapping.len() as u64 > region.start_addr().0 {
                 return Err(Error::MemoryRegionOverlap);
             }
         }
 
         Ok(Self {
-            regions: Arc::new(ranges),
+            regions: Arc::new(regions),
         })
     }
 
@@ -686,7 +690,12 @@ mod tests {
             Ok(())
         });
         assert!(res.is_ok());
-        assert_eq!(regions, iterated_regions);
+
+        assert!(regions
+            .iter()
+            .map(|x| (x.0, x.1))
+            .eq(iterated_regions.iter().map(|x| *x)));
+
         assert_eq!(gm.clone().regions[0].guest_base, regions[0].0);
         assert_eq!(gm.clone().regions[1].guest_base, regions[1].0);
     }
