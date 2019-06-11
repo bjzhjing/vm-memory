@@ -7,10 +7,12 @@ license = "Apache-2.0"
 
 [features]
 default = []
+integer-atomics = []
 backend-mmap = []
 
 [dependencies]
 libc = ">=0.2.39"
+cast = ">=0"
 
 [dev-dependencies]
 matches = ">=0"
