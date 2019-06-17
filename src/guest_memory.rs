@@ -329,8 +329,8 @@ pub trait GuestMemory {
         let mut total = 0;
         while let Some(region) = self.find_region(cur) {
             let start = region.to_region_addr(cur).unwrap();
-            let cap = region.len() as usize;
-            let len = std::cmp::min(cap, count - total);
+            let size = region.len() as usize - start.raw_value() as usize;
+            let len = std::cmp::min(size, count - total);
             match f(total, len, start, region) {
                 // no more data
                 Ok(0) => break,
